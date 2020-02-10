@@ -117,10 +117,11 @@ void* planner(void *arg)
   Args_t *nextMissile;
 
   while(1)
-  {
+  { 
     sem_wait(&semList);
     nextMissile=list_dequeue(l,1);  // if wait==1, waits until thereis an element
     sem_post(&nextMissile->semMissile);
+    printf("[Planner] Next missile: %03d\n",nextMissile->id);
   }
   return NULL;
 }
