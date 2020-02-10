@@ -18,6 +18,7 @@
 #include <signal.h> /* signal(2), SIGINT, SIG_DFL                     */
 #include <time.h>   /* clock_nanosleep(2)                             */
 #include <pthread.h>/* pthread stuff (_create,_exit,_setdettachstate) */
+#include <semaphore.h>
 #include "simusil.h"
 
 #define DELTATIME 10000 /* 10ns */
@@ -42,6 +43,7 @@ typedef struct{
   Cannon_ptr_t  c;
   Missile_ptr_t m;
   struct timespec deadline; 
+  sem_t semMissile;
 } Args_t;
 
 /* GLOBALs: needed by SIGINT handlers                                 */
@@ -49,7 +51,7 @@ World_ptr_t w;   /* to be destroyed at exit                           */
 Bomber_ptr_t b;  /* start/stop bombing                                */
 List_ptr_t l;    /* list of living threads                            */
 pthread_attr_t attr;
-pthread_mutex_t mutex_canon;
+sem_t semList;
 
 struct timespec startMain; /* Init main */
 
@@ -76,6 +78,52 @@ void handler(int signum)
   signal(SIGINT,destroyer);
 }
 
+/*  We need:        
+*     The new Elem is inserted between two elements
+*     elem_A and elem_B, where:
+*       elem_A->next == elem_B (AND elem_B->prev == elem_A)
+*         cmp(elem_B,new) => 1
+*         cmp(elem_A,new) => 0
+*       giving:
+*         elem_A->next == new; new->next == elemB
+*         elem_B->prev == new; new->prev == elemA
+*/
+int compareDeadline(void *arg1, void *arg2)
+{ 
+  
+  Args_t *listMissile=arg1;
+  Args_t *newMissile=arg2;
+  
+  if (newMissile->deadline.tv_sec < listMissile->deadline.tv_sec)  
+  {
+    return 1;
+  }
+  else if (newMissile->deadline.tv_sec  > listMissile->deadline.tv_sec)  
+  {
+    return 0;
+  } 
+  else if (newMissile->deadline.tv_nsec < listMissile->deadline.tv_nsec) 
+  {
+    return 1;
+  }
+  else
+  { 
+    return 0;
+  }
+}
+
+void* planner(void *arg)
+{
+  Args_t *nextMissile;
+
+  while(1)
+  {
+    sem_wait(&semList);
+    nextMissile=list_dequeue(l,1);  // if wait==1, waits until thereis an element
+    sem_post(&nextMissile->semMissile);
+  }
+  return NULL;
+}
 
 /* thread code */
 void *searchAndDestroy(void *arg)
@@ -84,17 +132,33 @@ void *searchAndDestroy(void *arg)
   MissileState sm;
   Pos p0, p1;
   struct timespec startThread, deadline;
-  const struct timespec deltaTime=(struct timespec){0, 10};/* 10ns*/
+  const struct timespec deltaTime=(struct timespec){0, 10000};/* 10ns*/
   const struct timespec stallTime=(struct timespec){0, 1000000};/* 1ms*/
   const struct timespec relaxTime=(struct timespec){0,10000000};/*10ms*/
 
-  list_enqueue(x,x->id,l);
+  //list_enqueue(x,x->id,l);
 
   clock_gettime(CLOCK_MONOTONIC, &startThread);
   sm=radarReadMissile(x->r,x->m,&p0);
 
+  timeAdd(startThread, deltaTime); /*10us later*/
+  clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&startThread,NULL);
+
+  sm=radarReadMissile(x->r,x->m,&p1);
+    
+  deadline.tv_nsec=(long)0;
+  deadline.tv_sec=-(time_t)((double)p1.y/(NSECS_PER_SEC*(p0.y-p1.y/(DELTATIME))));
+  timeAdd(deadline, startThread);
+  x->deadline = deadline;
+  
+  list_insert(x,compareDeadline,x->id,l);
+
+  printf("[%03d] Waiting cannon!\n",x->id);
+  sem_wait(&x->semMissile);
+  sm=radarReadMissile(x->r,x->m,&p1);
   if (sm != MISSILE_ACTIVE)
   {
+    sem_post(&semList); 
     printf("[%03d] Warning: missing missile!\n",x->id);
     printf("[%03d] \tBetween Wait & Read:\n",x->id);
     printf("[%03d] \t\tMissile impacted on ground, or\n",x->id);
@@ -102,25 +166,13 @@ void *searchAndDestroy(void *arg)
   }
   else
   {
-    timeAdd(startThread, deltaTime); /*10us later*/
-    clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&startThread,NULL);
-
-    sm=radarReadMissile(x->r,x->m,&p1);
-    
-  deadline.tv_nsec=(long)0;
-  deadline.tv_sec=-(time_t)((double)p1.y/(NSECS_PER_SEC*(p0.y-p1.y/(DELTATIME))));
-
-    //timeAdd(deadline, startMain);
-    x->deadline = deadline;
-
-    printf("[%03d] ---> Deadline = %lld.%.9ld\n",x->id,  (long long)x->deadline.tv_sec, x->deadline.tv_nsec);
-
-	  pthread_mutex_lock(&mutex_canon); /*reserva de cañon*/
     printf("[%03d] ---> Moving cannon to position %d\n",x->id,p0.x);
     cannonMove(x->c,p0.x);
     clock_nanosleep(CLOCK_MONOTONIC,0,&stallTime,NULL); /*espera antes*/
     cannonFire(x->c);
-    pthread_mutex_unlock(&mutex_canon); /*liberar cañon*/
+
+    sem_post(&semList);
+    
     /* bucle de monitorizacion hasta intercepcion */
     while ((sm=radarReadMissile(x->r,x->m,&p0)) == MISSILE_ACTIVE)
     {
@@ -156,7 +208,7 @@ int main(int argc, char *argv[])
 {
   Radar_ptr_t r;
   Cannon_ptr_t c;
-  Args_t *x;
+  Args_t *x, *argsPlanner;
   static int workerCount=0;
 
   debug_setlevel(1);
@@ -173,6 +225,11 @@ int main(int argc, char *argv[])
 
   signal(SIGINT,handler);
 
+  sem_init(&semList,0,1);
+  argsPlanner=(Args_t*)malloc(sizeof(Args_t));
+  argsPlanner->id = 0;
+  pthread_create(&argsPlanner->thid,&attr,planner,(void*)argsPlanner);
+
   printf("Press ctrl+C to stop bombing\n");
   startBombing(b);
   while(1)
@@ -181,6 +238,7 @@ int main(int argc, char *argv[])
     x->id=workerCount++;
     x->r=r;
     x->c=c;
+    sem_init(&x->semMissile,0,0);
     x->m=radarWaitMissile(r);
     pthread_create(&x->thid,&attr,searchAndDestroy,(void*)x);
   }
