@@ -21,18 +21,8 @@
 #include <semaphore.h>
 #include "simusil.h"
 
-#define DELTATIME 10000000 /* 100ns */
-#define NSECS_PER_SEC 1000000000UL
-#define DIF_TS(a,b) ((a.tv_sec-b.tv_sec)*NSECS_PER_SEC+(a.tv_nsec-b.tv_nsec))
-#define timeAdd(a,b)                  \
-  do {                                \
-    a.tv_sec+=b.tv_sec;               \
-    a.tv_nsec+=b.tv_nsec;             \
-    if (a.tv_nsec >= NSECS_PER_SEC) { \
-      a.tv_sec++;                     \
-      a.tv_nsec-=NSECS_PER_SEC;       \
-    }                                 \
-  } while(0)
+#define RIGHT 1
+#define LEFT  0
 
 /* WORKER STUFF                                                       */
 /* struct to pass all info to thread                                  */
@@ -42,7 +32,9 @@ typedef struct{
   Radar_ptr_t   r;
   Cannon_ptr_t  c;
   Missile_ptr_t m;
-  struct timespec deadline; 
+  long posX; 
+  int cannonMovingTo;
+  long cannonPosX;
   sem_t semMissile;
 } Args_t;
 
@@ -52,6 +44,8 @@ Bomber_ptr_t b;  /* start/stop bombing                                */
 List_ptr_t l;    /* list of living threads                            */
 pthread_attr_t attr;
 sem_t semList;
+long cannonLastPosX = -1;
+long cannonMovingDir = RIGHT;
 
 void destroyWorker(void *arg)
 {
@@ -86,27 +80,65 @@ void handler(int signum)
 *         elem_A->next == new; new->next == elemB
 *         elem_B->prev == new; new->prev == elemA
 */
-int compareDeadline(void *arg1, void *arg2)
+int comparePosition(void *arg1, void *arg2)
 { 
   
-  Args_t *listMissile=arg1;
-  Args_t *newMissile=arg2;
+  Args_t *elem=arg1;
+  Args_t *new=arg2;
   
-  if (newMissile->deadline.tv_sec < listMissile->deadline.tv_sec)  
+  if (new->cannonMovingTo == RIGHT) 
   {
-    return 1;
-  }
-  else if (newMissile->deadline.tv_sec  > listMissile->deadline.tv_sec)  
-  {
-    return 0;
+    if (new->posX > new->cannonPosX)
+    {
+      if (elem->posX >= new->cannonPosX)
+      {
+        if (elem->posX <= new->posX) return 0;
+        else return 1;
+      }
+      else
+      {
+        return 1;
+      }
+    }
+    else
+    {
+      if (elem->posX >= new->cannonPosX)
+      {
+        return 0;
+      }
+      else
+      {
+        if (elem->posX < new->posX) return 1;
+        else return 0;
+      }
+    }    
   } 
-  else if (newMissile->deadline.tv_nsec < listMissile->deadline.tv_nsec) 
-  {
-    return 1;
-  }
   else
-  { 
-    return 0;
+  {
+    if (new->posX < new->cannonPosX)
+    {
+      if (elem->posX <= new->cannonPosX)
+      {
+        if (elem->posX >= new->posX) return 0;
+        else return 1;
+      }
+      else
+      {
+        return 1;  
+      }
+    }
+    else
+    {
+      if (elem->posX <= new->cannonPosX)
+      {
+        return 0;
+      }
+      else
+      {
+        if (elem->posX > new->posX) return 1;
+        else return 0;
+      }      
+    }
   }
 }
 
@@ -129,32 +161,20 @@ void *searchAndDestroy(void *arg)
 {
   Args_t *x=arg;
   MissileState sm;
-  Pos p0, p1;
-  struct timespec startThread, deadline;
-  const struct timespec deltaTime=(struct timespec){0, DELTATIME};/* 100ns*/
+  Pos p;
   const struct timespec stallTime=(struct timespec){0, 1000000};/* 1ms*/
   const struct timespec relaxTime=(struct timespec){0,10000000};/*10ms*/
-  unsigned long timeRemaining;
   
-  clock_gettime(CLOCK_MONOTONIC, &startThread);
-  sm=radarReadMissile(x->r,x->m,&p0);
+  sm=radarReadMissile(x->r,x->m,&p);
 
-  timeAdd(startThread, deltaTime); /*10ns later*/
-  clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&startThread,NULL);
-
-  sm=radarReadMissile(x->r,x->m,&p1);
-
-  timeRemaining = (p1.y / (p0.y-p1.y)) * DELTATIME;
-  printf("[%03d] Deadline = %li ns\n",x->id,timeRemaining);
-  deadline=(struct timespec){0, timeRemaining};
-  timeAdd(deadline, startThread);
-  x->deadline = deadline;
-  
-  list_insert(x,compareDeadline,x->id,l);
+  x->posX = p.x;
+  x->cannonMovingTo = cannonMovingDir;
+  x->cannonPosX = cannonLastPosX;
+  list_insert(x,comparePosition,x->id,l);
 
   printf("[%03d] Waiting cannon!\n",x->id);
   sem_wait(&x->semMissile);
-  sm=radarReadMissile(x->r,x->m,&p1);
+  sm=radarReadMissile(x->r,x->m,&p);
   if (sm != MISSILE_ACTIVE)
   {
     sem_post(&semList); 
@@ -165,15 +185,19 @@ void *searchAndDestroy(void *arg)
   }
   else
   {
-    printf("[%03d] ---> Moving cannon to position %d\n",x->id,p0.x);
-    cannonMove(x->c,p0.x);
+    printf("[%03d] ---> Moving cannon to position %d\n",x->id,p.x);
+    cannonMove(x->c,p.x);
     clock_nanosleep(CLOCK_MONOTONIC,0,&stallTime,NULL); /*espera antes*/
     cannonFire(x->c);
+
+    if (p.x > cannonLastPosX) cannonMovingDir = RIGHT;
+    else cannonMovingDir = LEFT;
+    cannonLastPosX = p.x;
 
     sem_post(&semList);
     
     /* bucle de monitorizacion hasta intercepcion */
-    while ((sm=radarReadMissile(x->r,x->m,&p0)) == MISSILE_ACTIVE)
+    while ((sm=radarReadMissile(x->r,x->m,&p)) == MISSILE_ACTIVE)
     {
 	  //printf("[%03d] ---> en seguimiento (%d,%d)\n",x->id,p.x,p.y);
       clock_nanosleep(CLOCK_MONOTONIC,0,&relaxTime,NULL);
@@ -181,10 +205,10 @@ void *searchAndDestroy(void *arg)
     switch (sm)
     {
       case MISSILE_INTERCEPTED:
-           printf("[%03d] ---> Interceptado en (%d,%d)\n",x->id,p0.x,p0.y);
+           printf("[%03d] ---> Interceptado en (%d,%d)\n",x->id,p.x,p.y);
            break;
       case MISSILE_IMPACTED:
-           printf("[%03d] ---> Impacta en suelo (%d)\n",x->id,p0.x);
+           printf("[%03d] ---> Impacta en suelo (%d)\n",x->id,p.x);
            break;
       case MISSILE_ERROR:
       default:
