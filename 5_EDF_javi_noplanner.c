@@ -110,24 +110,11 @@ int compareDeadline(void *arg1, void *arg2)
   }
 }
 
-void* planner(void *arg)
-{
-  Args_t *nextMissile;
-
-  while(1)
-  { 
-    sem_wait(&semList);
-    nextMissile=list_dequeue(l,1);  // if wait==1, waits until thereis an element
-    printf("[Planner] Next missile: %03d\n",nextMissile->id);
-    sem_post(&nextMissile->semMissile);
-  }
-  return NULL;
-}
-
 /* thread code */
 void *searchAndDestroy(void *arg)
 {
   Args_t *x=arg;
+  Args_t *nextMissile;
   MissileState sm;
   Pos p0, p1;
   struct timespec startThread, deadline;
@@ -151,6 +138,11 @@ void *searchAndDestroy(void *arg)
   x->deadline = deadline;
   
   list_insert(x,compareDeadline,x->id,l);
+
+  sem_wait(&semList);
+  nextMissile=list_dequeue(l,1);  // if wait==1, waits until thereis an element
+  printf("[Planner] Next missile: %03d\n",nextMissile->id);
+  sem_post(&nextMissile->semMissile);
 
   printf("[%03d] Waiting cannon!\n",x->id);
   sem_wait(&x->semMissile);
@@ -207,7 +199,7 @@ int main(int argc, char *argv[])
 {
   Radar_ptr_t r;
   Cannon_ptr_t c;
-  Args_t *x, *argsPlanner;
+  Args_t *x;
   static int workerCount=0;
 
   debug_setlevel(1);
@@ -215,19 +207,15 @@ int main(int argc, char *argv[])
   w=createWorld("TRSM 2016",1,2); /* worldname,1 cannon,debug level 2 */
   b=getBomber(w);
   r=getRadar(w);
-  c=getCannon(w,0); /* [0..n-1] cannon number 0 (first of one)        */+ 
-  l=createList("Threads","worker",2); /* listname,elemname,debuglevel */0
-
-.  pthread_attr_init(&attr);
+  c=getCannon(w,0); /* [0..n-1] cannon number 0 (first of one)        */
+  l=createList("Threads","worker",2); /* listname,elemname,debuglevel */
+  pthread_attr_init(&attr);
   pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
   
   signal(SIGINT,handler);
 
   sem_init(&semList,0,1);
-  argsPlanner=(Args_t*)malloc(sizeof(Args_t));
-  argsPlanner->id = 0;
-  pthread_create(&argsPlanner->thid,&attr,planner,(void*)argsPlanner);
-
+  
   printf("Press ctrl+C to stop bombing\n");
   startBombing(b);
   while(1)
