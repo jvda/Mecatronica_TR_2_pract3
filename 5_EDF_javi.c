@@ -215,10 +215,10 @@ int main(int argc, char *argv[])
   w=createWorld("TRSM 2016",1,2); /* worldname,1 cannon,debug level 2 */
   b=getBomber(w);
   r=getRadar(w);
-  c=getCannon(w,0); /* [0..n-1] cannon number 0 (first of one)        */+ 
-  l=createList("Threads","worker",2); /* listname,elemname,debuglevel */0
+  c=getCannon(w,0); /* [0..n-1] cannon number 0 (first of one)        */
+  l=createList("Threads","worker",2); /* listname,elemname,debuglevel */
 
-.  pthread_attr_init(&attr);
+  pthread_attr_init(&attr);
   pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
   
   signal(SIGINT,handler);
