@@ -72,9 +72,13 @@ void *searchAndDestroy(void *arg)
 
   list_enqueue(x,x->id,l);
 
+  printf("+ [%03d] Waiting cannon!\n",x->id);
+  pthread_mutex_lock(&mutex_canon); /*reserva de cañon*/
+
   sm=radarReadMissile(x->r,x->m,&p);
   if (sm != MISSILE_ACTIVE)
-  {
+  { 
+    pthread_mutex_unlock(&mutex_canon); /*liberar cañon*/
     printf("[%03d] Warning: missing missile!\n",x->id);
     printf("[%03d] \tBetween Wait & Read:\n",x->id);
     printf("[%03d] \t\tMissile impacted on ground, or\n",x->id);
@@ -82,7 +86,6 @@ void *searchAndDestroy(void *arg)
   }
   else
   {
-	pthread_mutex_lock(&mutex_canon); /*reserva de cañon*/
     printf("[%03d] ---> Moving cannon to position %d\n",x->id,p.x);
     cannonMove(x->c,p.x);
     clock_nanosleep(CLOCK_MONOTONIC,0,&stallTime,NULL); /*espera antes*/
