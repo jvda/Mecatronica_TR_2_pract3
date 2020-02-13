@@ -51,7 +51,6 @@ World_ptr_t w;   /* to be destroyed at exit                           */
 Bomber_ptr_t b;  /* start/stop bombing                                */
 List_ptr_t l;    /* list of living threads                            */
 pthread_attr_t attr;
-sem_t semList;
 
 void destroyWorker(void *arg)
 {
@@ -139,17 +138,12 @@ void *searchAndDestroy(void *arg)
   
   list_insert(x,compareDeadline,x->id,l);
 
-  sem_wait(&semList);
-  nextMissile=list_dequeue(l,1);  // if wait==1, waits until thereis an element
-  printf("[Planner] Next missile: %03d\n",nextMissile->id);
-  sem_post(&nextMissile->semMissile);
-
-  printf("[%03d] Waiting cannon!\n",x->id);
+  printf("+ [%03d] Waiting cannon!\n",x->id);
   sem_wait(&x->semMissile);
+  printf("+ [%03d] I have cannon!\n",x->id);
   sm=radarReadMissile(x->r,x->m,&p1);
   if (sm != MISSILE_ACTIVE)
   {
-    sem_post(&semList); 
     printf("[%03d] Warning: missing missile!\n",x->id);
     printf("[%03d] \tBetween Wait & Read:\n",x->id);
     printf("[%03d] \t\tMissile impacted on ground, or\n",x->id);
@@ -161,9 +155,17 @@ void *searchAndDestroy(void *arg)
     cannonMove(x->c,p0.x);
     clock_nanosleep(CLOCK_MONOTONIC,0,&stallTime,NULL); /*espera antes*/
     cannonFire(x->c);
+  }
 
-    sem_post(&semList);
-    
+  list_remove(x,l);
+
+  printf("+ [%03d] Waiting next missile!\n",x->id);
+  nextMissile=list_dequeue(l,1);  // if wait==1, waits until thereis an element
+  printf("+ [%03d] Next missile: %03d\n",x->id,nextMissile->id);
+  sem_post(&nextMissile->semMissile);
+
+  if (sm == MISSILE_ACTIVE)
+  {  
     /* bucle de monitorizacion hasta intercepcion */
     while ((sm=radarReadMissile(x->r,x->m,&p0)) == MISSILE_ACTIVE)
     {
@@ -184,11 +186,23 @@ void *searchAndDestroy(void *arg)
     }
   }
 
-  list_remove(x,l);
   free(x);
   pthread_exit(NULL);
 }
 
+Args_t * newMissile(int id, Radar_ptr_t r, Cannon_ptr_t c)
+{
+  Args_t *x;
+
+  x=(Args_t*)malloc(sizeof(Args_t));
+  x->id=id;
+  x->r=r;
+  x->c=c;
+  sem_init(&x->semMissile,0,0);
+  x->m=radarWaitMissile(r);
+
+  return x;
+}
 
 /*
  * Main code
@@ -214,18 +228,17 @@ int main(int argc, char *argv[])
   
   signal(SIGINT,handler);
 
-  sem_init(&semList,0,1);
-  
   printf("Press ctrl+C to stop bombing\n");
   startBombing(b);
+
+  x = newMissile(workerCount++, r, c);
+  sem_post(&x->semMissile); // The first missile can continue
+  pthread_create(&x->thid,&attr,searchAndDestroy,(void*)x);
+
   while(1)
   {
-    x=(Args_t*)malloc(sizeof(Args_t));
-    x->id=workerCount++;
-    x->r=r;
-    x->c=c;
-    sem_init(&x->semMissile,0,0);
-    x->m=radarWaitMissile(r);
+    x = newMissile(workerCount++, r, c);
+
     pthread_create(&x->thid,&attr,searchAndDestroy,(void*)x);
   }
   return 0; /* never reached!                                         */
