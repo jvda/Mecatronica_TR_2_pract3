@@ -153,7 +153,7 @@ void* planner(void *arg)
     printf("[Planner] Next missile: %03d\n",nextMissile->id);
     sem_post(&nextMissile->semMissile);
   }
-  return NULL;
+  pthread_exit(NULL);
 }
 
 /* thread code */
